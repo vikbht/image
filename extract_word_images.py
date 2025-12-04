@@ -4,23 +4,112 @@
 # dependencies = [
 #     "aspose-words",
 #     "pillow",
+#     "easyocr",
 # ]
 # ///
 """
 Extract images from Word documents (.docx) and convert EMF files to PNG.
-
-This script extracts all images from a Word document and converts any
-EMF (Enhanced Metafile) images to PNG format for better compatibility.
+Also renames images based on text content found within them using OCR.
 """
 
 import os
 import sys
 import zipfile
 import shutil
+import re
 from pathlib import Path
 from typing import List, Tuple
 import argparse
 
+# Lazy load easyocr to avoid overhead if not used or during initial imports
+easyocr_reader = None
+
+def get_ocr_reader():
+    """Get or initialize the global EasyOCR reader."""
+    global easyocr_reader
+    if easyocr_reader is None:
+        import easyocr
+        import logging
+        # Suppress EasyOCR warnings
+        logging.getLogger('easyocr').setLevel(logging.ERROR)
+        print("Initializing OCR engine (this may take a moment)...")
+        # Use CPU to avoid potential GPU issues on some systems, unless configured otherwise
+        easyocr_reader = easyocr.Reader(['en'], gpu=False)
+    return easyocr_reader
+
+def sanitize_filename(text: str, max_length: int = 50) -> str:
+    """
+    Sanitize text to be safe for filenames.
+    
+    Args:
+        text: Input text
+        max_length: Maximum length of the filename
+        
+    Returns:
+        Sanitized filename string
+    """
+    # Remove invalid characters
+    text = re.sub(r'[<>:"/\\|?*]', '', text)
+    # Replace spaces and non-alphanumeric chars with underscores
+    text = re.sub(r'\s+', '_', text)
+    text = re.sub(r'[^\w\-_]', '', text)
+    # Remove leading/trailing underscores
+    text = text.strip('_')
+    
+    if not text:
+        return "untitled"
+        
+    return text[:max_length]
+
+def perform_ocr_and_rename(image_path: Path) -> Path:
+    """
+    Perform OCR on an image and rename it based on the content.
+    
+    Args:
+        image_path: Path to the image file
+        
+    Returns:
+        Path to the renamed file (or original if failed)
+    """
+    try:
+        reader = get_ocr_reader()
+        
+        # Read text from image
+        result = reader.readtext(str(image_path), detail=0)
+        
+        if not result:
+            print(f"  No text found in {image_path.name}")
+            return image_path
+            
+        # Use the first few words as the title
+        # Join first few results, but limit total length
+        full_text = " ".join(result)
+        
+        # Sanitize to create a valid filename
+        new_name = sanitize_filename(full_text)
+        
+        if new_name == "untitled":
+            return image_path
+            
+        # Construct new path
+        new_path = image_path.with_name(f"{new_name}{image_path.suffix}")
+        
+        # Handle duplicates
+        counter = 1
+        while new_path.exists() and new_path != image_path:
+            new_path = image_path.with_name(f"{new_name}_{counter}{image_path.suffix}")
+            counter += 1
+            
+        # Rename the file
+        image_path.rename(new_path)
+        print(f"  ✓ Renamed: {image_path.name} -> {new_path.name}")
+        print(f"    (Text: '{full_text[:60]}...')")
+        
+        return new_path
+        
+    except Exception as e:
+        print(f"  ⚠ OCR failed for {image_path.name}: {e}")
+        return image_path
 
 def identify_file_type(file_path: Path) -> str:
     """
@@ -247,7 +336,7 @@ def convert_emf_to_png(emf_path: Path, png_path: Path = None) -> Path:
     return None
 
 
-def process_word_document(docx_path: str, output_dir: str = None, convert_emf: bool = True):
+def process_word_document(docx_path: str, output_dir: str = None, convert_emf: bool = True, rename_images: bool = True):
     """
     Main function to extract and process images from a Word document.
     
@@ -255,6 +344,7 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
         docx_path: Path to the Word document
         output_dir: Output directory for extracted images (default: extracted_images)
         convert_emf: Whether to convert EMF files to PNG (default: True)
+        rename_images: Whether to rename images based on OCR content (default: True)
     """
     docx_path = Path(docx_path)
     
@@ -275,6 +365,9 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
     
     print(f"\nExtracted {len(extracted_files)} file(s)")
     
+    # List of final images to potentially rename
+    final_images = []
+    
     # Convert EMF files if requested
     if convert_emf:
         print("\nConverting EMF files to PNG...")
@@ -286,10 +379,42 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
                 result = convert_emf_to_png(emf_file)
                 if result:
                     converted_count += 1
+                    final_images.append(result)
+                else:
+                    final_images.append(emf_file)
             
             print(f"\nConverted {converted_count}/{len(emf_files)} EMF file(s) to PNG")
         else:
             print("No EMF files found to convert.")
+            final_images.extend(extracted_files)
+    else:
+        final_images.extend(extracted_files)
+        
+    # Add non-EMF files that weren't processed above
+    for f in extracted_files:
+        if f.suffix.lower() != '.emf' and f not in final_images:
+            final_images.append(f)
+            
+    # Rename images using OCR
+    if rename_images:
+        print("\nAnalyzing images and renaming based on content...")
+        print("(This requires OCR and may take some time)")
+        
+        renamed_count = 0
+        for img_path in final_images:
+            # Skip if file doesn't exist (e.g. was already renamed or deleted)
+            if not img_path.exists():
+                continue
+                
+            # Only process common image formats
+            if img_path.suffix.lower() not in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
+                continue
+                
+            new_path = perform_ocr_and_rename(img_path)
+            if new_path != img_path:
+                renamed_count += 1
+                
+        print(f"\nRenamed {renamed_count} file(s) based on content")
     
     print("\n" + "=" * 60)
     print(f"✓ Processing complete! Images saved to: {output_dir}")
@@ -299,13 +424,13 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
 def main():
     """Command-line interface for the script."""
     parser = argparse.ArgumentParser(
-        description="Extract images from Word documents and convert EMF to PNG",
+        description="Extract images from Word documents, convert EMF to PNG, and rename based on content",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   %(prog)s document.docx
   %(prog)s document.docx -o my_images
-  %(prog)s document.docx --no-convert
+  %(prog)s document.docx --no-ocr
         """
     )
     
@@ -328,10 +453,22 @@ Examples:
         help='Do not convert EMF files to PNG'
     )
     
+    parser.add_argument(
+        '--no-ocr',
+        dest='rename_images',
+        action='store_false',
+        help='Do not rename images based on OCR content'
+    )
+    
     args = parser.parse_args()
     
     try:
-        process_word_document(args.docx_file, args.output_dir, args.convert_emf)
+        process_word_document(
+            args.docx_file, 
+            args.output_dir, 
+            args.convert_emf,
+            args.rename_images
+        )
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

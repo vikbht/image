@@ -14,8 +14,10 @@ venv/
 extracted_images/
 extracted_images_python/
 extracted_images_uv/
+extracted_images_ocr/
 *.tmp
 *.log
+Aspose.OCR.log.txt
 
 # System
 .DS_Store

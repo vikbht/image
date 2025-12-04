@@ -7,6 +7,7 @@ A Python script to extract all images from Microsoft Word documents (.docx) and 
 - ✅ Extracts all images from .docx files
 - ✅ Automatically identifies file types (PNG, JPG, EMF, etc.)
 - ✅ Renames files with correct extensions
+- ✅ **Automatically renames images based on content** (using OCR)
 - ✅ Attempts to convert EMF files to PNG (when possible)
 - ✅ No external dependencies required for basic extraction
 - ✅ Command-line interface with options
