@@ -46,12 +46,12 @@ pip install aspose-words pillow
 
 ## Usage
 
-### Basic Usage
+### Basic Usage (with uv)
 
-Extract all images from a Word document:
+Extract all images from a Word document, convert EMFs, and rename based on content:
 
 ```bash
-python3 extract_word_images.py document.docx
+uv run extract_word_images.py document.docx
 ```
 
 This will create an `extracted_images` folder containing all images.
@@ -59,7 +59,15 @@ This will create an `extracted_images` folder containing all images.
 ### Specify Output Directory
 
 ```bash
-python3 extract_word_images.py document.docx -o my_images
+uv run extract_word_images.py document.docx -o my_images
+```
+
+### Disable OCR Renaming
+
+If you want to skip the OCR process (faster):
+
+```bash
+uv run extract_word_images.py document.docx --no-ocr
 ```
 
 ### Extract Without Converting EMF Files
@@ -67,13 +75,13 @@ python3 extract_word_images.py document.docx -o my_images
 If you just want to extract the files without attempting conversion:
 
 ```bash
-python3 extract_word_images.py document.docx --no-convert
+uv run extract_word_images.py document.docx --no-convert
 ```
 
 ### Help
 
 ```bash
-python3 extract_word_images.py --help
+uv run extract_word_images.py --help
 ```
 
 ## How It Works
@@ -85,30 +93,43 @@ python3 extract_word_images.py --help
 
 2. **File Type Detection**: The script reads the file signature (magic bytes) to identify the actual file type, regardless of the extension.
 
-3. **Renaming**: Files are renamed with the correct extension (.png, .jpg, .emf, etc.)
+3. **EMF Conversion**: The script attempts to convert EMF files to PNG using:
+   - **Aspose.Words** (primary, pure Python)
+   - LibreOffice (if installed on macOS)
+   - ImageMagick (fallback)
+   - Pillow (fallback)
 
-4. **EMF Conversion** (optional): The script attempts to convert EMF files to PNG using:
-   - ImageMagick (if installed)
-   - Pillow with pillow-emf extension (if available)
+4. **OCR Renaming**: The script uses **EasyOCR** to:
+   - Read text from each image
+   - Generate a descriptive filename (e.g., `Biceps_brachii_Site_4.png`)
+   - Rename the file automatically
 
 ## Example
 
 ```bash
-$ python3 extract_word_images.py o1.docx
+$ uv run extract_word_images.py o1.docx
 Processing: o1.docx
 Output directory: extracted_images
 ------------------------------------------------------------
 Found 9 image(s) in the document.
   Extracted: image8.tmp -> image8.emf
   Extracted: image1.png
-  Extracted: image2.tmp -> image2.emf
   ...
 
 Extracted 9 file(s)
 
 Converting EMF files to PNG...
-  ✓ Converted: image2.emf -> image2.png (using ImageMagick)
+  ✓ Converted: image2.emf -> image2.png (using Aspose.Words)
   ...
+
+Analyzing images and renaming based on content...
+(This requires OCR and may take some time)
+  ✓ Renamed: image5.png -> Biceps_brachii_Site_4.png
+    (Text: 'Biceps brachii Site 4...')
+  ✓ Renamed: image6.png -> Motor_NCS_L_Median.png
+    (Text: 'Motor NCS L Median...')
+
+Renamed 9 file(s) based on content
 
 ============================================================
 ✓ Processing complete! Images saved to: extracted_images
@@ -117,42 +138,19 @@ Converting EMF files to PNG...
 
 ## Troubleshooting
 
+### OCR Slowness
+OCR is computationally intensive. It may take a few seconds per image. If you have many images and don't need descriptive names, use `--no-ocr`.
+
 ### EMF Files Won't Convert
-
-EMF is a Windows-specific format. If conversion fails:
-
-1. **Use LibreOffice** (best option for macOS):
-   ```bash
-   brew install --cask libreoffice
-   brew install imagemagick
-   ```
-
-2. **Use an online converter**: Upload the extracted .emf files to https://convertio.co/emf-png/
-
-3. **Use Windows**: Open the .emf files on a Windows machine and save as PNG
-
-### "Command not found: python"
-
-Use `python3` instead:
-```bash
-python3 extract_word_images.py document.docx
-```
-
-### Permission Denied
-
-Make the script executable:
-```bash
-chmod +x extract_word_images.py
-./extract_word_images.py document.docx
-```
+EMF is a Windows-specific format. The script tries multiple methods. If all fail:
+1. Ensure `aspose-words` is installed (`uv sync`)
+2. Install LibreOffice: `brew install --cask libreoffice`
+3. Use an online converter: https://convertio.co/emf-png/
 
 ## Supported Image Formats
 
 The script can extract and identify:
-- PNG
-- JPEG/JPG
-- GIF
-- BMP
+- PNG, JPEG/JPG, GIF, BMP, TIFF
 - EMF (Enhanced Metafile)
 - ICO
 - And other formats embedded in Word documents
