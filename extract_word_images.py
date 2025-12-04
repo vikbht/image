@@ -5,6 +5,7 @@
 #     "aspose-words",
 #     "pillow",
 #     "easyocr",
+#     "opencv-python-headless",
 # ]
 # ///
 """
@@ -75,8 +76,32 @@ def perform_ocr_and_rename(image_path: Path) -> Path:
     try:
         reader = get_ocr_reader()
         
-        # Read text from image
-        result = reader.readtext(str(image_path), detail=0)
+        # Optimization: Resize image for faster OCR if it's too large
+        # We pass the path directly to easyocr usually, but for speed we can
+        # load, resize, and pass the numpy array
+        import cv2
+        import numpy as np
+        from PIL import Image
+        
+        # Read image using PIL (safer than cv2.imread for some formats/paths)
+        with Image.open(image_path) as img:
+            # Convert to RGB
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize if large (e.g. > 1000px width)
+            max_dimension = 1000
+            width, height = img.size
+            if width > max_dimension or height > max_dimension:
+                ratio = min(max_dimension / width, max_dimension / height)
+                new_size = (int(width * ratio), int(height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            # Convert to numpy array for EasyOCR
+            img_np = np.array(img)
+        
+        # Read text from image array
+        result = reader.readtext(img_np, detail=0)
         
         if not result:
             print(f"  No text found in {image_path.name}")
@@ -370,20 +395,32 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
     # List of final images to potentially rename
     final_images = []
     
+    import concurrent.futures
+    
     # Convert EMF files if requested
     if convert_emf:
-        print("\nConverting EMF files to PNG...")
+        print("\nConverting EMF files to PNG (Parallel)...")
         emf_files = [f for f in extracted_files if f.suffix.lower() == '.emf']
         
         if emf_files:
             converted_count = 0
-            for emf_file in emf_files:
-                result = convert_emf_to_png(emf_file)
-                if result:
-                    converted_count += 1
-                    final_images.append(result)
-                else:
-                    final_images.append(emf_file)
+            # Use ThreadPoolExecutor for parallel conversion
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Submit all conversion tasks
+                future_to_emf = {executor.submit(convert_emf_to_png, emf): emf for emf in emf_files}
+                
+                for future in concurrent.futures.as_completed(future_to_emf):
+                    emf_file = future_to_emf[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            converted_count += 1
+                            final_images.append(result)
+                        else:
+                            final_images.append(emf_file)
+                    except Exception as exc:
+                        print(f"  ⚠ Conversion generated an exception for {emf_file.name}: {exc}")
+                        final_images.append(emf_file)
             
             print(f"\nConverted {converted_count}/{len(emf_files)} EMF file(s) to PNG")
         else:
@@ -399,22 +436,58 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
             
     # Rename images using OCR
     if rename_images:
-        print("\nAnalyzing images and renaming based on content...")
+        print("\nAnalyzing images and renaming based on content (Parallel I/O)...")
         print("(This requires OCR and may take some time)")
         
-        renamed_count = 0
+        # Filter images eligible for OCR
+        images_to_process = []
         for img_path in final_images:
-            # Skip if file doesn't exist (e.g. was already renamed or deleted)
-            if not img_path.exists():
-                continue
+            if img_path.exists() and img_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
+                images_to_process.append(img_path)
+        
+        renamed_count = 0
+        if images_to_process:
+            # Initialize reader once
+            try:
+                get_ocr_reader()
+            except Exception as e:
+                print(f"Warning: Could not initialize OCR engine: {e}")
+                return
+
+            import threading
+            ocr_lock = threading.Lock()
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                # Submit tasks
+                future_to_img = {
+                    executor.submit(process_image_threaded, img, ocr_lock): img 
+                    for img in images_to_process
+                }
                 
-            # Only process common image formats
-            if img_path.suffix.lower() not in ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']:
-                continue
-                
-            new_path = perform_ocr_and_rename(img_path)
-            if new_path != img_path:
-                renamed_count += 1
+                for future in concurrent.futures.as_completed(future_to_img):
+                    try:
+                        result = future.result()
+                        if result:
+                            original_path, new_name, full_text = result
+                            
+                            if new_name == "untitled":
+                                continue
+                                
+                            # Construct new path
+                            new_path = original_path.with_name(f"{new_name}{original_path.suffix}")
+                            
+                            # Handle duplicates
+                            counter = 1
+                            while new_path.exists() and new_path != original_path:
+                                new_path = original_path.with_name(f"{new_name}_{counter}{original_path.suffix}")
+                                counter += 1
+                                
+                            original_path.rename(new_path)
+                            print(f"  ✓ Renamed: {original_path.name} -> {new_path.name}")
+                            print(f"    (Text: '{full_text[:60]}...')")
+                            renamed_count += 1
+                    except Exception as exc:
+                        print(f"  ⚠ OCR generated an exception: {exc}")
                 
         print(f"\nRenamed {renamed_count} file(s) based on content")
     
@@ -423,6 +496,75 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
     print(f"✓ Processing complete! Images saved to: {output_dir}")
     print(f"  Time taken: {elapsed_time:.2f} seconds")
     print("=" * 60)
+
+# Global variable to hold the EasyOCR reader instance
+easyocr_reader = None
+
+def get_ocr_reader():
+    """
+    Initializes and returns the EasyOCR reader.
+    This function is designed to be called in a threaded context.
+    """
+    global easyocr_reader
+    if easyocr_reader is None:
+        import easyocr
+        import logging
+        logging.getLogger('easyocr').setLevel(logging.ERROR)
+        # Try to use GPU (MPS on Mac) for speed
+        try:
+            easyocr_reader = easyocr.Reader(['en'], gpu=True)
+        except Exception:
+            print("Warning: GPU initialization failed, falling back to CPU")
+            easyocr_reader = easyocr.Reader(['en'], gpu=False)
+    return easyocr_reader
+
+def process_image_threaded(image_path: Path, lock) -> tuple:
+    """Worker function for threaded OCR."""
+    try:
+        reader = get_ocr_reader()
+            
+        # Optimization: Resize image logic (Parallel)
+        import cv2
+        import numpy as np
+        from PIL import Image
+        
+        with Image.open(image_path) as img:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Aggressive resizing for speed
+            max_dimension = 500
+            width, height = img.size
+            if width > max_dimension or height > max_dimension:
+                ratio = min(max_dimension / width, max_dimension / height)
+                new_size = (int(width * ratio), int(height * ratio))
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            img_np = np.array(img)
+            
+        # Serialized Inference
+        with lock:
+            result = reader.readtext(img_np, detail=0)
+        
+        if not result:
+            return None
+            
+        full_text = " ".join(result)
+        
+        # Sanitize logic
+        import re
+        text = full_text
+        text = re.sub(r'[<>:"/\\|?*]', '', text)
+        text = re.sub(r'\s+', '_', text)
+        text = re.sub(r'[^\w\-_]', '', text)
+        text = text.strip('_')
+        if not text: text = "untitled"
+        new_name = text[:50]
+        
+        return (image_path, new_name, full_text)
+        
+    except Exception as e:
+        return None
 
 
 def main():
