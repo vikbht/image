@@ -17,6 +17,7 @@ import sys
 import zipfile
 import shutil
 import re
+import time
 from pathlib import Path
 from typing import List, Tuple
 import argparse
@@ -346,6 +347,7 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
         convert_emf: Whether to convert EMF files to PNG (default: True)
         rename_images: Whether to rename images based on OCR content (default: True)
     """
+    start_time = time.time()
     docx_path = Path(docx_path)
     
     if output_dir is None:
@@ -416,8 +418,10 @@ def process_word_document(docx_path: str, output_dir: str = None, convert_emf: b
                 
         print(f"\nRenamed {renamed_count} file(s) based on content")
     
+    elapsed_time = time.time() - start_time
     print("\n" + "=" * 60)
     print(f"✓ Processing complete! Images saved to: {output_dir}")
+    print(f"  Time taken: {elapsed_time:.2f} seconds")
     print("=" * 60)
 
 
